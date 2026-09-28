@@ -1,0 +1,223 @@
+(() => {
+  const RAMP = "█▓▒░@%#*+=-:;,.`^~·•";
+  const COLS = 360;
+const ROWS = 203;
+  const TARGET_FPS = 60;
+  const FRAME_MS = 1000 / TARGET_FPS;
+
+  const CODES = new Uint16Array(RAMP.length);
+  for (let i = 0; i < RAMP.length; i++) CODES[i] = RAMP.charCodeAt(i);
+  const LUMA_LUT = new Uint16Array(256);
+  const MAX = RAMP.length - 1;
+  for (let v = 0; v < 256; v++) LUMA_LUT[v] = CODES[(v / 255 * MAX) | 0];
+
+  let mode = "select";
+  let mediaFile = null;
+  let rafId = 0;
+  let styled = false;
+
+  const decoder = new TextDecoder("utf-16le");
+  const fileInput = document.createElement("input");
+  fileInput.type = "file";
+  fileInput.style.display = "none";
+  document.body.append(fileInput);
+
+  let box = null;
+  function getBox() {
+    if (!box || !document.contains(box)) {
+      box = document.querySelector('textarea[name="q"], input[name="q"]');
+      styled = false;
+    }
+    return box;
+  }
+
+  function render(text) {
+    const el = getBox();
+    if (!el) return;
+    el.value = text;
+    el.dispatchEvent(new Event("input", { bubbles: true }));
+    if (!styled) {
+      styled = true;
+      const s = el.style;
+      s.fontFamily = "monospace";
+      s.fontSize = "4.9px";
+      s.lineHeight = "1";
+      s.letterSpacing = "-1px";
+      s.padding = "0";
+      s.margin = "0";
+      s.whiteSpace = "pre";
+      s.overflow = "hidden";
+      s.resize = "none";
+      s.transform = "scale3d(1,0.35,1)";
+      s.transformOrigin = "top left";
+      s.willChange = "transform";
+    }
+    el.style.height = el.scrollHeight + "px";
+  }
+
+  function showCentered(message) {
+    const pad = " ".repeat(COLS);
+    const left = (COLS - message.length) >> 1;
+    const right = COLS - left - message.length;
+    const line = " ".repeat(left) + message + " ".repeat(right);
+    let out = "";
+    for (let r = ROWS; ~r; r--) {
+      out += r === (ROWS >> 1) ? line + "\n" : pad + "\n";
+    }
+    render(out);
+  }
+
+  showCentered("###  SELECT MEDIA FILE  ###");
+
+  let audioCtx = null;
+  const getAudioCtx = () => audioCtx || (audioCtx = new AudioContext({
+    latencyHint: "interactive",
+    sampleRate: 48000
+    })
+  );
+
+  function playAudio(file) {
+    const audio = new Audio(URL.createObjectURL(file));
+    audio.volume = 1;
+    const ctx = getAudioCtx();
+    const analyser = ctx.createAnalyser();
+    analyser.fftSize = 256;
+    analyser.smoothingTimeConstant = 0;
+    const freq = new Uint8Array(analyser.frequencyBinCount);
+    const src = ctx.createMediaElementSource(audio);
+    src.connect(analyser);
+    analyser.connect(ctx.destination);
+    const latency = (ctx.baseLatency || 0) + (ctx.outputLatency || 0);
+    const buf = new Uint8Array(ROWS * (COLS + 1));
+    const NEWLINE = 10, HASH = 35, SPACE = 32;
+    for (let r = 0; r < ROWS; r++) buf[r * (COLS + 1) + COLS] = NEWLINE;
+
+    let last = 0;
+    function frame(now) {
+      if (audio.paused || audio.ended) return;
+      if (now - last >= FRAME_MS) {
+        last = now;
+        analyser.getByteFrequencyData(freq);
+        const n = freq.length;
+        let o = 0;
+        for (let row = ROWS - 1; ~row; row--) {
+          const threshold = row * 255 / (ROWS - 1);
+          for (let c = 0; c < COLS; c++) {
+            buf[o++] = freq[c % n] >= threshold ? HASH : SPACE;
+          }
+          o++;
+        }
+        render(decoder.decode(buf));
+      }
+      rafId = requestAnimationFrame(frame);
+    }
+    rafId = requestAnimationFrame(frame);
+    ctx.resume().then(() => {
+    audio.play();
+    });
+  }
+
+  function playVideo(file) {
+    const video = Object.assign(document.createElement("video"), {
+      src: URL.createObjectURL(file),
+      volume: 1,
+      playsInline: true,
+      style: "display:none"
+    });
+    document.body.append(video);
+    const canvas = document.createElement("canvas");
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
+    let buf = null, buf8 = null, rows = 0, last = 0;
+
+    function frame(now) {
+  if (video.paused || video.ended) return;
+
+  if (!video.videoWidth) { 
+    rafId = requestAnimationFrame(frame); 
+    return; 
+  }
+
+  if (now - last < FRAME_MS * 0.5) { 
+    rafId = requestAnimationFrame(frame); 
+    return; 
+  }
+
+  last = now;
+
+      const scale = video.videoWidth / COLS;
+      const h = (video.videoHeight / scale) | 0;
+      if (!buf || rows !== h) {
+        rows = h;
+        buf = new Uint16Array(h * (COLS + 1));
+        buf8 = new Uint8Array(h * (COLS + 1));
+        for (let r = 0; r < h; r++) buf[r * (COLS + 1) + COLS] = 10;
+      }
+      canvas.width = COLS;
+      canvas.height = h;
+      ctx.drawImage(video, 0, 0, COLS, h);
+      const d = ctx.getImageData(0, 0, COLS, h).data;
+      let o = 0, p = 0;
+      for (let r = 0; r < h; r++) {
+        for (let c = 0; c < COLS; c++, p += 4) {
+          buf[o++] = LUMA_LUT[(d[p] * 77 + d[p + 1] * 151 + d[p + 2] * 28) >> 8];
+        }
+        o++;
+      }
+      try {
+        render(decoder.decode(buf));
+      } catch (_) {
+        for (let i = 0; i < buf.length; i++) buf8[i] = buf[i];
+        render(new TextDecoder().decode(buf8));
+      }
+      rafId = requestAnimationFrame(frame);
+    }
+    rafId = requestAnimationFrame(frame);
+    video.play();
+  }
+
+  document.addEventListener("click", async () => {
+    if (mode === "select") {
+      fileInput.click();
+      return;
+    }
+    if (mode === "start") {
+      mode = "play";
+      const ctx = getAudioCtx();
+      await ctx.resume();
+      if (mediaFile.type.startsWith("audio/")) {
+        playAudio(mediaFile);
+      } else {
+        playVideo(mediaFile);
+      }
+    }
+  });
+
+  fileInput.onchange = () => {
+    const f = fileInput.files[0];
+    if (!f) return;
+    mediaFile = f;
+    mode = "start";
+    showCentered("###  START  ###");
+  };
+})();
+
+(()=>{
+  const el = document.querySelector("#sI1XGe");
+
+  if(!el){
+    alert("削除対象 (#sI1XGe) が見つかりません");
+    return;
+  }
+
+  const text = el.innerText || "";
+  if(confirm(
+    "この要素を削除しますか？\n\n" +
+    "ID: " + el.id + "\n" +
+    "内容: text.slice(0,80) || Googleロゴ"
+  )){
+    el.remove();
+    alert("削除しました");
+  }else{
+    alert("キャンセルしました");
+  }
+})();
